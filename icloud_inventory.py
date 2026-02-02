@@ -13,6 +13,7 @@ import mimetypes
 import os
 from pathlib import Path
 import pwd
+import sqlite3
 import subprocess
 from typing import Iterable, Optional
 
@@ -59,6 +60,11 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Prompt for roots/output/format instead of relying on defaults.",
+    )
+    parser.add_argument(
         "--roots",
         nargs="+",
         default=[str(Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs")],
@@ -71,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--format",
-        choices=["jsonl", "csv"],
+        choices=["jsonl", "csv", "sqlite"],
         default="jsonl",
         help="Output format.",
     )
@@ -257,6 +263,19 @@ def csv_row(record: dict) -> dict:
 
 def main() -> int:
     args = parse_args()
+    if args.interactive:
+        roots_input = input(
+            "Roots to scan (comma-separated) "
+            f"[{','.join(args.roots)}]: "
+        ).strip()
+        if roots_input:
+            args.roots = [item.strip() for item in roots_input.split(",") if item.strip()]
+        output_input = input(f"Output path [{args.output}]: ").strip()
+        if output_input:
+            args.output = output_input
+        format_input = input(f"Format jsonl/csv/sqlite [{args.format}]: ").strip().lower()
+        if format_input in {"jsonl", "csv", "sqlite"}:
+            args.format = format_input
     output_path = Path(args.output).expanduser().resolve()
     text_extensions = {ext.strip().lower() for ext in args.text_extensions.split(",") if ext.strip()}
     mdls_fields = [field.strip() for field in args.mdls_fields.split(",") if field.strip()]
@@ -264,8 +283,8 @@ def main() -> int:
     processed = 0
     written = 0
 
-    with output_path.open("w", encoding="utf-8", newline="" if args.format == "csv" else None) as handle:
-        writer = None
+    def record_stream() -> Iterable[dict]:
+        nonlocal processed
         for path in iter_paths(args.roots, args.include_hidden, args.include_directories):
             try:
                 stat_result = path.stat()
@@ -284,17 +303,72 @@ def main() -> int:
                     pass
             ai_signals = detect_ai_signals(signal_sources)
             record = build_record(path, stat_result, mdls_data, ai_signals)
-            if args.format == "jsonl":
-                write_json_line(handle, record)
-            else:
-                if writer is None:
-                    writer = csv.DictWriter(handle, fieldnames=list(record.keys()))
-                    writer.writeheader()
-                writer.writerow(csv_row(record))
-            written += 1
             processed += 1
+            yield record
             if args.max_files and processed >= args.max_files:
                 break
+
+    if args.format == "sqlite":
+        connection = sqlite3.connect(output_path)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS inventory (
+                path TEXT,
+                name TEXT,
+                extension TEXT,
+                is_dir INTEGER,
+                size_bytes INTEGER,
+                created_epoch REAL,
+                created_iso TEXT,
+                modified_epoch REAL,
+                modified_iso TEXT,
+                owner TEXT,
+                mime_type TEXT,
+                mdls TEXT,
+                ai_signals TEXT
+            )
+            """
+        )
+        insert_sql = (
+            "INSERT INTO inventory "
+            "(path, name, extension, is_dir, size_bytes, created_epoch, created_iso, "
+            "modified_epoch, modified_iso, owner, mime_type, mdls, ai_signals) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        with connection:
+            for record in record_stream():
+                row = csv_row(record)
+                connection.execute(
+                    insert_sql,
+                    (
+                        record["path"],
+                        record["name"],
+                        record["extension"],
+                        int(record["is_dir"]),
+                        record["size_bytes"],
+                        record["created_epoch"],
+                        record["created_iso"],
+                        record["modified_epoch"],
+                        record["modified_iso"],
+                        record["owner"],
+                        record["mime_type"],
+                        row["mdls"],
+                        row["ai_signals"],
+                    ),
+                )
+                written += 1
+    else:
+        with output_path.open("w", encoding="utf-8", newline="" if args.format == "csv" else None) as handle:
+            writer = None
+            for record in record_stream():
+                if args.format == "jsonl":
+                    write_json_line(handle, record)
+                else:
+                    if writer is None:
+                        writer = csv.DictWriter(handle, fieldnames=list(record.keys()))
+                        writer.writeheader()
+                    writer.writerow(csv_row(record))
+                written += 1
 
     print(f"Wrote {written} records to {output_path}")
     return 0

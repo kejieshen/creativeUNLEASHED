@@ -21,6 +21,7 @@ python3 icloud_inventory.py \
 
 ### Optional flags
 
+- `--interactive`: prompt for roots/output/format in the terminal.
 - `--skip-mdls`: avoid Spotlight metadata lookup.
 - `--mdls-timeout 5`: timeout for each `mdls` call.
 - `--mdls-fields ...`: customize the Spotlight fields collected.
@@ -28,6 +29,7 @@ python3 icloud_inventory.py \
 - `--max-files 5000`: limit scanned files.
 - `--include-hidden`: include hidden files and folders.
 - `--include-directories`: include directories in the output.
+- `--format sqlite`: write results to a SQLite database (`inventory` table).
 
 ### Output
 
